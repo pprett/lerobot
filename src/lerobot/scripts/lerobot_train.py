@@ -282,7 +282,7 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         processor_kwargs["dataset_stats"] = dataset.meta.stats
 
     # For SARM, always provide dataset_meta for progress normalization
-    if cfg.policy.type == "sarm":
+    if cfg.policy.type.endswith("sarm"):
         processor_kwargs["dataset_meta"] = dataset.meta
 
     if processor_pretrained_path is not None:

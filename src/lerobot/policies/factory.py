@@ -140,7 +140,7 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from .smolvla.modeling_smolvla import SmolVLAPolicy
 
         return SmolVLAPolicy
-    elif name == "sarm":
+    elif name == "sarm" or name == "hsarm":
         from .sarm.modeling_sarm import SARMRewardModel
 
         return SARMRewardModel

@@ -245,3 +245,26 @@ class SARMConfig(PreTrainedConfig):
     @property
     def reward_delta_indices(self) -> None:
         return None
+
+
+@PreTrainedConfig.register_subclass("hsarm")
+@dataclass
+class HSARMConfig(SARMConfig):
+
+    @property
+    def observation_delta_indices(self) -> list[int]:
+        """Historical frame sampling w/ in the back target frame.
+
+        Example with n_obs_steps=8, gap=30:
+        Before:  [-240, -210, -180, -150, -120, -90, -60, -30] 
+ (8 frames)
+        Current: [0]                   (1 frame)
+        Total: 9 frames
+        """
+        past_deltas = [-self.frame_gap * i for i in range(self.n_obs_steps, 0, -1)]
+        obs_deltas = past_deltas + [0]
+
+        # Rewind placeholders
+        rewind_deltas = [-self.frame_gap * (i + 1) for i in range(self.max_rewind_steps)]
+
+        return obs_deltas + rewind_deltas

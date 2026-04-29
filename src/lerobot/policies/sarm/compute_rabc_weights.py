@@ -60,6 +60,8 @@ from tqdm import tqdm
 from lerobot.datasets import LeRobotDataset
 
 from .modeling_sarm import SARMRewardModel
+from .configuration_sarm import SARMConfig
+from .configuration_sarm import HSARMConfig
 from .processor_sarm import make_sarm_pre_post_processors
 from .sarm_utils import normalize_stage_tau
 
@@ -209,6 +211,14 @@ def visualize_episode(
     print(f"Saved: {output_path}")
 
 
+def get_target_idx_from_config(config: SARMConfig):
+    if isinstance(config, HSARMConfig):
+        return config.n_obs_steps
+    else:
+        # Center frame index for bidirectional sampling
+        return config.n_obs_steps // 2
+
+
 def visualize_sarm_predictions(
     dataset: LeRobotDataset,
     reward_model: SARMRewardModel,
@@ -243,8 +253,7 @@ def visualize_sarm_predictions(
     dual_mode = reward_model.config.uses_dual_heads
     device = reward_model.device
 
-    # Center frame index for bidirectional sampling
-    target_idx = reward_model.config.n_obs_steps // 2
+    target_idx = get_target_idx_from_config(reward_model.config)
 
     # Determine which heads to visualize
     schemes_to_viz = []
@@ -537,7 +546,9 @@ def compute_sarm_progress(
         else:
             compute_indices = all_ep_indices
 
-        center_idx = reward_model.config.n_obs_steps // 2  # Center of bidirectional window
+        # FIXME for hsarm its not center but last
+        center_idx = get_target_idx_from_config(reward_model.config)
+        assert isinstance(reward_model.config, HSARMConfig)
 
         # Dictionary to collect results
         frame_results = {}

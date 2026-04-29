@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .configuration_sarm import SARMConfig
+from .configuration_sarm import HSARMConfig
 from .modeling_sarm import SARMRewardModel
 
-__all__ = ["SARMConfig", "SARMRewardModel"]
+__all__ = ["SARMConfig", "HSARMConfig", "SARMRewardModel"]

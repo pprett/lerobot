@@ -25,6 +25,7 @@ from .rtc import ActionInterpolator as ActionInterpolator
 from .sac.configuration_sac import SACConfig as SACConfig
 from .sac.reward_model.configuration_classifier import RewardClassifierConfig as RewardClassifierConfig
 from .sarm.configuration_sarm import SARMConfig as SARMConfig
+from .sarm.configuration_sarm import HSARMConfig as HSARMConfig
 from .smolvla.configuration_smolvla import SmolVLAConfig as SmolVLAConfig
 from .tdmpc.configuration_tdmpc import TDMPCConfig as TDMPCConfig
 from .utils import make_robot_action, prepare_observation_for_inference
@@ -48,6 +49,7 @@ __all__ = [
     "RewardClassifierConfig",
     "SACConfig",
     "SARMConfig",
+    "HSARMConfig",
     "SmolVLAConfig",
     "TDMPCConfig",
     "VQBeTConfig",
