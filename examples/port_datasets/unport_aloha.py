@@ -21,11 +21,15 @@ is written as a ``episode_{idx:06d}.hdf5`` following the layout used by
 https://github.com/tonyzhaozh/act:
 
     /action                           float (T, A)
+    /progress                         float (T,)             [if SARM progress is present]
     /observations/qpos                float (T, S)
     /observations/qvel                float (T, S)          [if present]
     /observations/effort              float (T, S)          [if present]
     /observations/images/<camera>     uint8 (T, H, W, 3)    uncompressed
                                       uint8 (T, max_bytes)  JPEG-compressed
+
+If the LeRobot dataset has a ``sarm_progress.parquet`` sidecar, the selected
+progress score column is written into each episode HDF5 file as ``/progress``.
 
 Example:
 
@@ -35,6 +39,7 @@ Example:
 """
 
 import argparse
+import contextlib
 import io
 import logging
 from pathlib import Path
@@ -55,6 +60,9 @@ STATE_KEY = "observation.state"
 VELOCITY_KEY = "observation.velocity"
 EFFORT_KEY = "observation.effort"
 ACTION_KEY = "action"
+SARM_PROGRESS_FILENAME = "sarm_progress.parquet"
+SARM_PROGRESS_INDEX_COLUMNS = ("episode_index", "frame_index")
+DEFAULT_SARM_PROGRESS_COLUMN = "progress_dense"
 
 
 def _stack_column(series: pd.Series, dtype=np.float32) -> np.ndarray:
@@ -65,17 +73,80 @@ def _stack_column(series: pd.Series, dtype=np.float32) -> np.ndarray:
 def _load_episode_parquet(dataset: LeRobotDataset, ep_idx: int) -> pd.DataFrame:
     parquet_path = dataset.root / dataset.meta.get_data_file_path(ep_idx)
     df = pd.read_parquet(parquet_path)
-    return (
-        df[df["episode_index"] == ep_idx]
-        .sort_values("frame_index")
-        .reset_index(drop=True)
+    return df[df["episode_index"] == ep_idx].sort_values("frame_index").reset_index(drop=True)
+
+
+def _episode_num_frames(dataset: LeRobotDataset, ep_idx: int) -> int:
+    ep = dataset.meta.episodes[ep_idx]
+    return ep["dataset_to_index"] - ep["dataset_from_index"]
+
+
+def _resolve_sarm_progress_path(dataset: LeRobotDataset, progress_path: Path | None) -> Path | None:
+    if progress_path is not None:
+        return progress_path
+
+    progress_path = dataset.root / SARM_PROGRESS_FILENAME
+    if progress_path.exists():
+        return progress_path
+
+    # LeRobotDataset downloads only standard data/video files for selected episodes.
+    # Try to fetch the optional sidecar from the Hub before deciding it is absent.
+    with contextlib.suppress(Exception):
+        dataset.pull_from_repo(allow_patterns=SARM_PROGRESS_FILENAME)
+    return progress_path if progress_path.exists() else None
+
+
+def load_sarm_progress_scores(
+    dataset: LeRobotDataset,
+    ep_indices: list[int],
+    progress_path: Path | None = None,
+    progress_column: str = DEFAULT_SARM_PROGRESS_COLUMN,
+) -> dict[int, np.ndarray]:
+    """Load per-episode SARM progress scores to write into HDF5 files."""
+    progress_path = _resolve_sarm_progress_path(dataset, progress_path)
+    if progress_path is None:
+        logging.info(f"No {SARM_PROGRESS_FILENAME} found; skipping SARM progress score export")
+        return {}
+    if not progress_path.exists():
+        raise FileNotFoundError(f"SARM progress score file not found: {progress_path}")
+
+    df = pd.read_parquet(progress_path)
+    missing_columns = [col for col in SARM_PROGRESS_INDEX_COLUMNS if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"{progress_path} is missing required columns: {missing_columns}")
+    if progress_column not in df.columns:
+        progress_columns = [col for col in df.columns if "progress" in col.lower()]
+        raise ValueError(
+            f"{progress_path} does not contain progress column '{progress_column}'. "
+            f"Available progress columns: {progress_columns}"
+        )
+    if df.duplicated(["episode_index", "frame_index"]).any():
+        raise ValueError(f"{progress_path} contains duplicate episode/frame progress rows")
+
+    progress_by_episode: dict[int, np.ndarray] = {}
+    for ep_idx in ep_indices:
+        num_frames = _episode_num_frames(dataset, ep_idx)
+        ep_df = df[df["episode_index"] == ep_idx].sort_values("frame_index")
+        expected_frame_indices = np.arange(num_frames)
+        actual_frame_indices = ep_df["frame_index"].to_numpy(dtype=np.int64)
+        if len(ep_df) != num_frames or not np.array_equal(actual_frame_indices, expected_frame_indices):
+            raise ValueError(
+                f"Progress scores for episode {ep_idx} do not match exported frames: "
+                f"expected frame_index 0..{num_frames - 1}, found {len(ep_df)} rows"
+            )
+        progress_by_episode[ep_idx] = ep_df[progress_column].to_numpy(dtype=np.float32)
+
+    logging.info(
+        f"Loaded SARM progress column '{progress_column}' from {progress_path} "
+        f"for {len(progress_by_episode)} episode(s)"
     )
+    return progress_by_episode
 
 
 def _decode_episode_video(dataset: LeRobotDataset, ep_idx: int, image_key: str) -> np.ndarray:
     """Decode every frame of an episode from the backing mp4 as (T, H, W, 3) uint8 RGB."""
     ep = dataset.meta.episodes[ep_idx]
-    num_frames = ep["dataset_to_index"] - ep["dataset_from_index"]
+    num_frames = _episode_num_frames(dataset, ep_idx)
     fps = dataset.meta.fps
     from_timestamp = ep[f"videos/{image_key}/from_timestamp"]
     timestamps = [from_timestamp + i / fps for i in range(num_frames)]
@@ -93,10 +164,7 @@ def _decode_parquet_images(series: pd.Series) -> np.ndarray:
     """Decode a parquet ``datasets.Image()`` column into (T, H, W, 3) uint8 RGB."""
     frames = []
     for entry in series.to_list():
-        if isinstance(entry, dict):
-            buf = entry.get("bytes")
-        else:
-            buf = entry
+        buf = entry.get("bytes") if isinstance(entry, dict) else entry
         img = Image.open(io.BytesIO(buf)).convert("RGB")
         frames.append(np.asarray(img))
     return np.stack(frames, axis=0)
@@ -126,6 +194,7 @@ def _write_hdf5(
     images: dict[str, np.ndarray],
     qvel: np.ndarray | None,
     effort: np.ndarray | None,
+    progress: np.ndarray | None,
     compress: bool,
     jpeg_quality: int,
     is_sim: bool,
@@ -142,6 +211,8 @@ def _write_hdf5(
             obs.create_dataset("effort", data=effort)
 
         f.create_dataset("action", data=action)
+        if progress is not None:
+            f.create_dataset("progress", data=progress)
 
         images_group = obs.create_group("images")
         for cam, frames in images.items():
@@ -164,6 +235,7 @@ def export_episode(
     compress: bool,
     jpeg_quality: int,
     is_sim: bool,
+    progress: np.ndarray | None = None,
 ) -> None:
     ep_df = _load_episode_parquet(dataset, ep_idx)
     features = dataset.features
@@ -187,6 +259,7 @@ def export_episode(
         images=images,
         qvel=qvel,
         effort=effort,
+        progress=progress,
         compress=compress,
         jpeg_quality=jpeg_quality,
         is_sim=is_sim,
@@ -201,6 +274,9 @@ def unport_aloha(
     compress: bool = True,
     jpeg_quality: int = 50,
     is_sim: bool = False,
+    progress_path: Path | None = None,
+    progress_column: str = DEFAULT_SARM_PROGRESS_COLUMN,
+    export_progress: bool = True,
 ) -> None:
     dataset = LeRobotDataset(repo_id=repo_id, root=root, episodes=episodes)
     output_dir = Path(output_dir)
@@ -209,8 +285,20 @@ def unport_aloha(
     ep_indices = episodes if episodes is not None else list(range(dataset.meta.total_episodes))
     logging.info(f"Exporting {len(ep_indices)} episode(s) from {repo_id} to {output_dir}")
 
+    progress_by_episode = (
+        load_sarm_progress_scores(dataset, ep_indices, progress_path, progress_column) if export_progress else {}
+    )
+
     for ep_idx in tqdm(ep_indices, desc="Exporting episodes"):
-        export_episode(dataset, ep_idx, output_dir, compress, jpeg_quality, is_sim)
+        export_episode(
+            dataset,
+            ep_idx,
+            output_dir,
+            compress,
+            jpeg_quality,
+            is_sim,
+            progress=progress_by_episode.get(ep_idx),
+        )
 
 
 def main() -> None:
@@ -259,6 +347,26 @@ def main() -> None:
         action="store_true",
         help="Set the HDF5 root attribute 'sim' to True (matches ALOHA simulation datasets).",
     )
+    parser.add_argument(
+        "--progress-path",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to an input SARM progress sidecar parquet. Defaults to "
+            f"'<dataset_root>/{SARM_PROGRESS_FILENAME}' and is skipped if absent."
+        ),
+    )
+    parser.add_argument(
+        "--progress-column",
+        type=str,
+        default=DEFAULT_SARM_PROGRESS_COLUMN,
+        help="Progress score column from the sidecar parquet to write as '/progress'.",
+    )
+    parser.add_argument(
+        "--no-progress",
+        action="store_true",
+        help="Do not write optional SARM progress scores into the HDF5 files.",
+    )
 
     args = parser.parse_args()
 
@@ -270,6 +378,9 @@ def main() -> None:
         compress=not args.no_compress,
         jpeg_quality=args.jpeg_quality,
         is_sim=args.sim,
+        progress_path=args.progress_path,
+        progress_column=args.progress_column,
+        export_progress=not args.no_progress,
     )
 
 
