@@ -49,8 +49,12 @@ import argparse
 import logging
 from pathlib import Path
 
-import matplotlib.gridspec as gridspec
-import matplotlib.pyplot as plt
+import einops
+import matplotlib
+
+matplotlib.use("Agg")  # non-interactive backend; avoids tkinter dep on headless machines
+import matplotlib.gridspec as gridspec  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq

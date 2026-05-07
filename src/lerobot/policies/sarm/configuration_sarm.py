@@ -52,6 +52,7 @@ class SARMConfig(PreTrainedConfig):
     n_obs_steps: int = 8  # Number of observation history steps
     frame_gap: int = 30  # Frame gap between frames (at 30 fps = 1 second)
     max_rewind_steps: int = 4  # Maximum rewind steps for temporal augmentation
+    no_state: bool = False  # disable state feature
 
     # Total frames = 1 + n_obs_steps + max_rewind_steps (computed in property)
     # During training with rewind: [obs_frames] + [rewind_frames]

@@ -279,6 +279,9 @@ class SARMEncodingProcessorStep(ProcessorStep):
             if valid_len < state_tensor.shape[1]:
                 state_tensor[b_idx, valid_len:] = 0  # Zero out frames beyond valid length
 
+        if self.config.no_state:
+            state_tensor = torch.zeros_like(state_tensor, device=state_tensor.device)
+
         observation["state_features"] = pad_state_to_max_dim(state_tensor, self.config.max_state_dim)
 
         task = comp_data.get("task")
