@@ -17,7 +17,7 @@
 Export a LeRobotDataset to ALOHA-style HDF5 files (one file per episode).
 
 This is the inverse of the legacy ``aloha_hdf5_format`` ingestion. Each episode
-is written as a ``episode_{idx:06d}.hdf5`` following the layout used by
+is written as a ``episode_{idx:06d}.hdf`` following the layout used by
 https://github.com/tonyzhaozh/act:
 
     /action                           float (T, A)
@@ -27,6 +27,11 @@ https://github.com/tonyzhaozh/act:
     /observations/effort              float (T, S)          [if present]
     /observations/images/<camera>     uint8 (T, H, W, 3)    uncompressed
                                       uint8 (T, max_bytes)  JPEG-compressed
+
+Sensor and camera output prefixes are configurable. For example, use
+``--sensor-prefix lowdim/robot/follower/state --camera-prefix image/robot/cam``
+to write qpos under ``/lowdim/robot/follower/state/qpos`` and cameras under
+``/image/robot/cam/<camera>``.
 
 If the LeRobot dataset has a ``sarm_progress.parquet`` sidecar, the selected
 progress score column is written into each episode HDF5 file as ``/progress``.
@@ -60,6 +65,8 @@ STATE_KEY = "observation.state"
 VELOCITY_KEY = "observation.velocity"
 EFFORT_KEY = "observation.effort"
 ACTION_KEY = "action"
+DEFAULT_SENSOR_PREFIX = "observations"
+DEFAULT_CAMERA_PREFIX = "observations/images"
 SARM_PROGRESS_FILENAME = "sarm_progress.parquet"
 SARM_PROGRESS_INDEX_COLUMNS = ("episode_index", "frame_index")
 DEFAULT_SARM_PROGRESS_COLUMN = "progress_dense"
@@ -68,6 +75,12 @@ DEFAULT_SARM_PROGRESS_COLUMN = "progress_dense"
 def _stack_column(series: pd.Series, dtype=np.float32) -> np.ndarray:
     """Stack a parquet column of vector values into a (T, D) numpy array."""
     return np.stack([np.asarray(x, dtype=dtype) for x in series.to_list()], axis=0)
+
+
+def _join_hdf5_path(prefix: str, name: str) -> str:
+    prefix = prefix.strip("/")
+    name = name.strip("/")
+    return f"{prefix}/{name}" if prefix else name
 
 
 def _load_episode_parquet(dataset: LeRobotDataset, ep_idx: int) -> pd.DataFrame:
@@ -198,30 +211,32 @@ def _write_hdf5(
     compress: bool,
     jpeg_quality: int,
     is_sim: bool,
+    sensor_prefix: str,
+    camera_prefix: str,
 ) -> None:
     hdf5_path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(hdf5_path, "w") as f:
         f.attrs["sim"] = is_sim
+        f.attrs["compress"] = compress
 
-        obs = f.create_group("observations")
-        obs.create_dataset("qpos", data=qpos)
+        f.create_dataset(_join_hdf5_path(sensor_prefix, "qpos"), data=qpos)
         if qvel is not None:
-            obs.create_dataset("qvel", data=qvel)
+            f.create_dataset(_join_hdf5_path(sensor_prefix, "qvel"), data=qvel)
         if effort is not None:
-            obs.create_dataset("effort", data=effort)
+            f.create_dataset(_join_hdf5_path(sensor_prefix, "effort"), data=effort)
 
         f.create_dataset("action", data=action)
         if progress is not None:
             f.create_dataset("progress", data=progress)
 
-        images_group = obs.create_group("images")
         for cam, frames in images.items():
+            image_path = _join_hdf5_path(camera_prefix, cam)
             if compress:
                 padded, lengths = _compress_jpeg(frames, quality=jpeg_quality)
-                ds = images_group.create_dataset(cam, data=padded, dtype="uint8")
+                ds = f.create_dataset(image_path, data=padded, dtype="uint8")
                 ds.attrs["compress_len"] = lengths
             else:
-                images_group.create_dataset(cam, data=frames, dtype="uint8")
+                f.create_dataset(image_path, data=frames, dtype="uint8")
 
 
 def _camera_name(image_key: str) -> str:
@@ -236,6 +251,8 @@ def export_episode(
     jpeg_quality: int,
     is_sim: bool,
     progress: np.ndarray | None = None,
+    sensor_prefix: str = DEFAULT_SENSOR_PREFIX,
+    camera_prefix: str = DEFAULT_CAMERA_PREFIX,
 ) -> None:
     ep_df = _load_episode_parquet(dataset, ep_idx)
     features = dataset.features
@@ -251,7 +268,7 @@ def export_episode(
     for key in dataset.meta.image_keys:
         images[_camera_name(key)] = _decode_parquet_images(ep_df[key])
 
-    hdf5_path = output_dir / f"episode_{ep_idx:06d}.hdf5"
+    hdf5_path = output_dir / f"episode_{ep_idx:06d}.hdf"
     _write_hdf5(
         hdf5_path,
         qpos=qpos,
@@ -263,6 +280,8 @@ def export_episode(
         compress=compress,
         jpeg_quality=jpeg_quality,
         is_sim=is_sim,
+        sensor_prefix=sensor_prefix,
+        camera_prefix=camera_prefix,
     )
 
 
@@ -277,6 +296,8 @@ def unport_aloha(
     progress_path: Path | None = None,
     progress_column: str = DEFAULT_SARM_PROGRESS_COLUMN,
     export_progress: bool = True,
+    sensor_prefix: str = DEFAULT_SENSOR_PREFIX,
+    camera_prefix: str = DEFAULT_CAMERA_PREFIX,
 ) -> None:
     dataset = LeRobotDataset(repo_id=repo_id, root=root, episodes=episodes)
     output_dir = Path(output_dir)
@@ -298,6 +319,8 @@ def unport_aloha(
             jpeg_quality,
             is_sim,
             progress=progress_by_episode.get(ep_idx),
+            sensor_prefix=sensor_prefix,
+            camera_prefix=camera_prefix,
         )
 
 
@@ -348,6 +371,24 @@ def main() -> None:
         help="Set the HDF5 root attribute 'sim' to True (matches ALOHA simulation datasets).",
     )
     parser.add_argument(
+        "--sensor-prefix",
+        type=str,
+        default=DEFAULT_SENSOR_PREFIX,
+        help=(
+            "HDF5 group prefix for sensor datasets qpos/qvel/effort. "
+            f"Defaults to '{DEFAULT_SENSOR_PREFIX}'."
+        ),
+    )
+    parser.add_argument(
+        "--camera-prefix",
+        type=str,
+        default=DEFAULT_CAMERA_PREFIX,
+        help=(
+            "HDF5 group prefix for camera datasets. "
+            f"Defaults to '{DEFAULT_CAMERA_PREFIX}'."
+        ),
+    )
+    parser.add_argument(
         "--progress-path",
         type=Path,
         default=None,
@@ -381,6 +422,8 @@ def main() -> None:
         progress_path=args.progress_path,
         progress_column=args.progress_column,
         export_progress=not args.no_progress,
+        sensor_prefix=args.sensor_prefix,
+        camera_prefix=args.camera_prefix,
     )
 
 
