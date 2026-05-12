@@ -216,7 +216,7 @@ def visualize_episode(
 
 
 def get_target_idx_from_config(config: SARMConfig):
-    if isinstance(config, HSARMConfig):
+    if isinstance(config, SARMConfig):
         return config.n_obs_steps
     else:
         # Center frame index for bidirectional sampling
@@ -552,7 +552,7 @@ def compute_sarm_progress(
 
         # FIXME for hsarm its not center but last
         center_idx = get_target_idx_from_config(reward_model.config)
-        assert isinstance(reward_model.config, HSARMConfig)
+        assert isinstance(reward_model.config, SARMConfig)
 
         # Dictionary to collect results
         frame_results = {}
