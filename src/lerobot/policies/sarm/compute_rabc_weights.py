@@ -216,7 +216,7 @@ def visualize_episode(
 
 
 def get_target_idx_from_config(config: SARMConfig):
-    if isinstance(config, SARMConfig):
+    if isinstance(config, HSARMConfig):
         return config.n_obs_steps
     else:
         # Center frame index for bidirectional sampling
